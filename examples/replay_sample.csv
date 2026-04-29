@@ -1,0 +1,4 @@
+phase,time,arm_joint_angle,arm_joint_velocity,arm_motor_current,end_effector_position_error,interface_force,interface_torque,seal_pressure,donor_tank_pressure,receiver_tank_pressure,line_pressure,flow_rate,pump_current,propellant_temperature,line_temperature,attitude_error,reaction_wheel_speed,bus_voltage,total_mass_transferred,system_mode
+approach,0.0,0.1,0.0,0.2,500.0,0.0,0.0,0.0,300.0,50.0,0.0,0.0,0.1,-20.0,-15.0,1.5,1500.0,28.0,0.0,approach
+approach,0.5,0.2,0.0,0.2,496.0,0.0,0.0,0.0,300.1,50.1,0.0,0.0,0.1,-20.1,-15.1,1.48,1502.0,28.0,0.0,approach
+arm_alignment,60.0,0.5,0.5,2.5,49.0,0.1,0.0,0.0,300.0,50.0,0.0,0.0,0.1,-20.0,-15.0,0.3,1800.0,28.0,0.0,arm_alignment

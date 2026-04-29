@@ -63,9 +63,11 @@ class PhaseAwareDetector:
         self,
         contamination: float = 0.02,
         n_estimators: int = 150,
+        random_state: int = 42,
     ) -> None:
         self.contamination = contamination
         self.n_estimators = n_estimators
+        self.random_state = random_state
         self._models: dict[str, IsolationForest] = {}
         self._scalers: dict[str, StandardScaler] = {}
 
@@ -80,7 +82,7 @@ class PhaseAwareDetector:
             model = IsolationForest(
                 contamination=self.contamination,
                 n_estimators=self.n_estimators,
-                random_state=42,
+                random_state=self.random_state,
                 n_jobs=-1,
             )
             model.fit(X)
@@ -116,3 +118,54 @@ class PhaseAwareDetector:
     @property
     def trained_phases(self) -> list[str]:
         return list(self._models.keys())
+
+
+class EnsemblePhaseAwareDetector:
+    """Small nominal-seed ensemble for advisory score uncertainty bands.
+
+    Each member trains the same phase-aware detector on a different nominal
+    seed. The score interval reflects sensitivity to nominal calibration data,
+    not a statistical guarantee for real spacecraft telemetry.
+    """
+
+    def __init__(
+        self,
+        seeds: tuple[int, ...] = (0, 1, 2, 3, 4),
+        contamination: float = 0.02,
+        n_estimators: int = 100,
+    ) -> None:
+        self.seeds = seeds
+        self.contamination = contamination
+        self.n_estimators = n_estimators
+        self.detectors: list[PhaseAwareDetector] = []
+
+    def fit(self) -> "EnsemblePhaseAwareDetector":
+        from simulator import generate_telemetry
+
+        self.detectors = []
+        for seed in self.seeds:
+            nominal_df = generate_telemetry("nominal", seed=seed)
+            detector = PhaseAwareDetector(
+                contamination=self.contamination,
+                n_estimators=self.n_estimators,
+                random_state=1000 + seed,
+            ).fit(nominal_df)
+            self.detectors.append(detector)
+        return self
+
+    def score_members(self, df: pd.DataFrame) -> np.ndarray:
+        if not self.detectors:
+            raise RuntimeError("EnsemblePhaseAwareDetector must be fit before scoring.")
+        return np.vstack([detector.score(df) for detector in self.detectors])
+
+    def score_summary(self, df: pd.DataFrame) -> pd.DataFrame:
+        member_scores = self.score_members(df)
+        return pd.DataFrame(
+            {
+                "ml_score_mean": member_scores.mean(axis=0),
+                "ml_score_low": np.percentile(member_scores, 5, axis=0),
+                "ml_score_high": np.percentile(member_scores, 95, axis=0),
+                "ml_score_uncertainty": member_scores.std(axis=0),
+            },
+            index=df.index,
+        )

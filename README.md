@@ -21,9 +21,13 @@ Orbital Refueling Telemetry Simulator demonstrates a monitoring architecture for
 
 - Full 410-second synthetic orbital refueling mission sampled at 2 Hz
 - Nine mission phases, from approach through retreat
-- Seven selectable scenarios: nominal plus six anomaly cases
+- Ten selectable scenarios: nominal plus nine anomaly cases
 - Deterministic rule alerts with severity and recommended actions
 - One `IsolationForest` model per mission phase
+- ML uncertainty bands from a nominal-seed detector ensemble
+- Optional line-pressure state estimate and residual chart
+- Experimental rolling-window sequence score in validation
+- CSV replay ingestion and drift summary scaffolding
 - Perturbation-based signal contribution estimates
 - Beginner Mode with plain-English chart captions and a signal glossary
 - Scenario validation script for repeatable regression checks
@@ -61,6 +65,9 @@ Rules alone may miss gradual correlated degradation. ML alone is not appropriate
 | `pump_degradation` | Current spikes, flow becomes erratic, line heats up | `pump_current`, `flow_rate`, `line_temperature` |
 | `arm_misalignment` | End-effector error stays high; interface loads rise | `end_effector_position_error`, `interface_force` |
 | `sensor_drift` | Pressure readings drift upward over the mission | `line_pressure`, `donor_tank_pressure` |
+| `sensor_dropout` | Pressure telemetry briefly drops to zero while other signals continue | `line_pressure`, `receiver_tank_pressure` |
+| `stuck_at_pressure` | Line pressure freezes at a plausible value during transfer | `line_pressure` |
+| `bias_oscillation` | Pressure sensor bias oscillates without crossing hard limits | `line_pressure`, `donor_tank_pressure` |
 | `unstable_slosh` | Flow and line pressure oscillate during transfer | `flow_rate`, `line_pressure`, `propellant_temperature` |
 
 ## Project Structure
@@ -70,8 +77,12 @@ Rules alone may miss gradual correlated degradation. ML alone is not appropriate
 | `app.py` | Streamlit dashboard |
 | `simulator.py` | Synthetic mission telemetry and anomaly injection |
 | `rules.py` | Deterministic engineering rules and grouped alerts |
-| `detector.py` | Phase-aware `IsolationForest` anomaly detector |
+| `detector.py` | Phase-aware `IsolationForest` anomaly detector and nominal-seed uncertainty ensemble |
+| `estimator.py` | Lightweight line-pressure estimator and residual calculation |
+| `sequence_detector.py` | Experimental rolling-window temporal anomaly detector |
+| `replay.py` | CSV replay schema validation and drift summary helpers |
 | `explainer.py` | Perturbation-based feature attribution |
+| `examples/replay_sample.csv` | Minimal replay CSV with expected schema |
 | `scripts/validate_scenarios.py` | Scenario validation summary |
 | `tests/` | Regression tests for simulator, rules, detector, and explanations |
 | `docs/` | Architecture and implementation notes |
@@ -112,6 +123,11 @@ Key validation fields:
 |---|---|
 | `max_ml_score` | Highest phase-aware ML anomaly score observed |
 | `mean_ml_score` | Average ML anomaly score across the mission |
+| `mean_ml_uncertainty` | Average spread across the nominal-seed detector ensemble |
+| `max_ml_uncertainty` | Largest ensemble score spread in the mission |
+| `max_sequence_score` | Highest experimental rolling-window temporal anomaly score |
+| `mean_sequence_score` | Average experimental temporal anomaly score |
+| `max_pressure_residual` | Largest observed-vs-estimated line-pressure residual |
 | `ml_anomaly_rate_pct` | Percent of rows above the dashboard ML threshold |
 | `raw_rule_alert_count` | Count of raw deterministic rule alert rows |
 | `grouped_rule_alert_count` | Count of grouped dashboard alert events |
@@ -123,6 +139,8 @@ Expected validation story:
 - `nominal` remains quiet, with low ML scores and no rule alerts.
 - `partial_blockage` triggers both ML scoring and deterministic pressure/current rules.
 - `sensor_drift` raises ML scores while deterministic rules can remain quiet.
+- `sensor_dropout` and `stuck_at_pressure` highlight sensor-fault behavior through ML scores and estimator residuals.
+- `bias_oscillation` demonstrates temporal/sensor behavior that can stay below deterministic pressure limits.
 - `unstable_slosh` raises ML scores through coupled flow, pressure, and thermal behavior without necessarily crossing hard thresholds.
 
 These numbers are regression evidence for synthetic scenarios, not real-world performance estimates.
@@ -136,15 +154,14 @@ This repository keeps the public overview in `README.md` and `MODEL_CARD.md`. Ex
 - Synthetic data only; the simulator is not a high-fidelity spacecraft model.
 - Not flight software, an autonomous abort system, or a certified safety interlock.
 - Rule thresholds are illustrative and not derived from real spacecraft engineering limits.
-- `IsolationForest` scores each row independently and does not model temporal sequences.
+- `IsolationForest` scores each row independently; the rolling-window detector is experimental and only used as a comparison layer.
 - Perturbation attribution is approximate and not causal proof.
 - The detector is trained offline and does not perform online learning or drift adaptation.
+- Uncertainty bands reflect sensitivity to synthetic nominal seeds, not calibrated confidence for real spacecraft telemetry.
 
 ## Future Improvements
 
-- Add sequence-aware anomaly detection such as an LSTM autoencoder or temporal convolutional model.
-- Add state estimation with a Kalman filter or similar estimator.
-- Add richer sensor fault scenarios such as dropout, stuck-at readings, and bias oscillation.
-- Add confidence intervals around anomaly scores.
-- Add online drift monitoring and retraining workflows.
-- Add an ingestion layer for replaying external telemetry datasets.
+- Calibrate uncertainty intervals on independent nominal data.
+- Expand replay ingestion into streaming/online drift monitoring.
+- Compare rolling-window temporal scores against stronger sequence models when a deep-learning dependency is justified.
+- Add richer multi-fault scenarios and phase-label fault injection.

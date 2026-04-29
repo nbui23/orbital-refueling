@@ -9,7 +9,7 @@
 | Model type | IsolationForest (scikit-learn), one instance per mission phase |
 | Number of models | 9 (one per operation phase) |
 | Input features | 17 numeric telemetry signals |
-| Output | Anomaly score per timestep, range [0, 1] |
+| Output | Anomaly score per timestep, range [0, 1], plus optional ensemble uncertainty band |
 | Score interpretation | 0 = consistent with nominal; 1 = strongly inconsistent with nominal |
 | Library | scikit-learn 1.x |
 | Hyperparameters | n_estimators=200, contamination=0.02, random_state=42 |
@@ -61,6 +61,14 @@ The sigmoid steepness (k=20) is a fixed design choice, not validated against cal
 
 ---
 
+## Uncertainty Band
+
+The dashboard trains a small ensemble of phase-aware detectors on different nominal simulator seeds. The 5th and 95th percentile of member scores form a score band, and standard deviation is reported as uncertainty.
+
+This is a prototype method for showing sensitivity to nominal calibration data. It is not a calibrated statistical confidence interval and should not be interpreted as real flight risk probability.
+
+---
+
 ## Performance on Synthetic Scenarios
 
 Performance is measured on synthetic test data (seed=42), not real telemetry. These numbers reflect how well the model distinguishes synthetic anomalies from synthetic nominal data — they do not predict real-world performance.
@@ -73,11 +81,34 @@ Performance is measured on synthetic test data (seed=42), not real telemetry. Th
 | pump_degradation | 0.343 | 28.7% | 2 |
 | arm_misalignment | 0.437 | 52.4% | 10 |
 | sensor_drift | 0.408 | 36.7% | 0 |
+| sensor_dropout | validation script reports current value | validation script reports current value | scenario-dependent |
+| stuck_at_pressure | validation script reports current value | validation script reports current value | scenario-dependent |
+| bias_oscillation | validation script reports current value | validation script reports current value | scenario-dependent |
 | unstable_slosh | 0.325 | 24.4% | 0 |
 
 No precision/recall metrics are reported because this is a demonstration with synthetic ground truth and a single test seed. Formal evaluation would require a held-out dataset with independent generation seeds.
 
 The key demonstration pattern is that `partial_blockage` triggers both ML and deterministic rules, while `sensor_drift` and `unstable_slosh` are ML-visible without deterministic rule alerts. This supports the hybrid-monitoring story, but it is not evidence of real spacecraft performance.
+
+The added sensor scenarios show different rule-vs-ML behavior: dropout can create sharp estimator residuals, stuck-at readings can stay plausible to hard limits while becoming anomalous in context, and bias oscillation stresses temporal comparison without necessarily crossing pressure rules.
+
+---
+
+## Experimental Temporal Detector
+
+`sequence_detector.py` adds a rolling-window baseline over pressure, flow, and pump-current features. It compares rolling means, rolling standard deviations, and deltas against nominal per-phase distributions. It does not replace the IsolationForest; validation reports it as a side-by-side experimental score.
+
+---
+
+## State Estimation
+
+`estimator.py` adds a one-dimensional Kalman-style estimator for line pressure. The dashboard can show observed pressure, estimated pressure, and residuals. This helps separate sensor-like faults from physical transfer trends in the demo.
+
+---
+
+## Replay and Drift Scaffolding
+
+`replay.py` validates CSV telemetry against the expected schema and reports mean-shift drift against nominal training distributions. This is ingestion scaffolding only; it does not do online learning or automated retraining.
 
 ---
 
@@ -100,17 +131,17 @@ For each anomalous timestep (score > 0.45), each feature is individually replace
 
 **Data limitations:**
 - Training and test data are from the same simplified generative process (same simulator, different seeds). This measures distribution shift within synthetic data, not real-world generalization.
-- Synthetic noise (Gaussian) does not capture real sensor failure modes: stuck-at faults, dropouts, quantization artifacts, bias temperature dependence.
+- Synthetic noise and added sensor faults still do not capture real sensor failure modes comprehensively: quantization artifacts, thermal dependence, timing faults, and multi-sensor failures remain simplified.
 - All anomaly scenarios are distinct and clean. Real faults often co-occur, evolve non-monotonically, or appear only in certain operating conditions.
 
 **Model limitations:**
-- IsolationForest treats each timestep independently. Temporal correlations (a signal rising over 30 seconds) are only captured indirectly through the feature values at each timestep, not through sequence modelling.
+- IsolationForest treats each timestep independently. The rolling-window detector is an experimental sidecar, not a replacement sequence model.
 - Per-phase conditioning assumes phase labels are always correct. If phase detection fails (e.g., stuck in wrong phase state), the wrong model is applied and scores are unreliable.
-- No uncertainty quantification. The model does not distinguish between "confidently nominal" and "uncertain" — both produce low scores.
+- Uncertainty quantification is seed-ensemble sensitivity only, not calibrated predictive uncertainty.
 - Contamination parameter (0.02) was not empirically validated against real nominal data distributions.
 
 **Operational limitations:**
-- Static model: no online learning, no drift detection, no recalibration mechanism.
+- Static model: replay drift summaries exist, but there is no online learning or recalibration mechanism.
 - No complete failure-mode coverage. The model will not necessarily surface anomaly scenarios it was not tested against.
 - Alert threshold (0.45) is a design choice, not tuned to a specific false-positive/false-negative operating point.
 - Not flight software, not an autonomous abort system, and not a real spacecraft diagnosis system.

@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from detector import FEATURE_COLS, PhaseAwareDetector
+from detector import EnsemblePhaseAwareDetector, FEATURE_COLS, PhaseAwareDetector
 from explainer import explain_row, explain_window
 from simulator import PHASES, generate_telemetry
 
@@ -84,6 +84,18 @@ class TestPhaseAwareDetector:
         other_mask = ~transfer_mask & anom_df["phase"].isin(["approach", "arm_alignment"])
         # main_transfer should have higher mean score than quiet phases
         assert scores[transfer_mask].mean() > scores[other_mask].mean()
+
+    def test_ensemble_score_summary_has_uncertainty_columns(self, nominal_df):
+        ensemble = EnsemblePhaseAwareDetector(seeds=(0, 1), n_estimators=20).fit()
+        summary = ensemble.score_summary(nominal_df.iloc[:20])
+        assert list(summary.columns) == [
+            "ml_score_mean",
+            "ml_score_low",
+            "ml_score_high",
+            "ml_score_uncertainty",
+        ]
+        assert len(summary) == 20
+        assert (summary["ml_score_low"] <= summary["ml_score_high"]).all()
 
 
 class TestExplainer:

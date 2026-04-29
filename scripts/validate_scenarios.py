@@ -13,10 +13,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from detector import PhaseAwareDetector
+from detector import EnsemblePhaseAwareDetector, PhaseAwareDetector
+from estimator import estimate_line_pressure
 from explainer import explain_window
 from rules import evaluate_rules, group_alerts
 from simulator import ANOMALY_SCENARIOS, generate_telemetry
+from sequence_detector import RollingWindowAnomalyDetector
 
 OUTPUT_DIR = ROOT / "outputs"
 DETECTOR_PATH = OUTPUT_DIR / "default_phase_aware_detector.pkl"
@@ -68,6 +70,9 @@ def _top_contributing_signal(contribs: dict[str, float]) -> str:
 def evaluate_scenario(detector: PhaseAwareDetector, scenario: str) -> dict[str, object]:
     df = generate_telemetry(scenario, seed=SCENARIO_SEED)
     scores = detector.score(df)
+    score_summary = evaluate_scenario.ensemble.score_summary(df)  # type: ignore[attr-defined]
+    sequence_scores = evaluate_scenario.sequence_detector.score(df)  # type: ignore[attr-defined]
+    estimates = estimate_line_pressure(df)
     raw_alerts = evaluate_rules(df)
     grouped_alerts = group_alerts(raw_alerts, gap_s=15.0)
     contribs = explain_window(
@@ -83,6 +88,11 @@ def evaluate_scenario(detector: PhaseAwareDetector, scenario: str) -> dict[str, 
         "scenario": scenario,
         "max_ml_score": round(float(scores.max()), 3),
         "mean_ml_score": round(float(scores.mean()), 3),
+        "mean_ml_uncertainty": round(float(score_summary["ml_score_uncertainty"].mean()), 3),
+        "max_ml_uncertainty": round(float(score_summary["ml_score_uncertainty"].max()), 3),
+        "max_sequence_score": round(float(sequence_scores.max()), 3),
+        "mean_sequence_score": round(float(sequence_scores.mean()), 3),
+        "max_pressure_residual": round(float(estimates["line_pressure_residual"].abs().max()), 3),
         "ml_anomaly_rate_pct": round(float((scores > ML_THRESHOLD).mean() * 100.0), 1),
         "raw_rule_alert_count": len(raw_alerts),
         "grouped_rule_alert_count": len(grouped_alerts),
@@ -96,6 +106,11 @@ def _print_table(results: pd.DataFrame) -> None:
         "scenario": "Scenario",
         "max_ml_score": "Max ML",
         "mean_ml_score": "Mean ML",
+        "mean_ml_uncertainty": "Mean ML Unc",
+        "max_ml_uncertainty": "Max ML Unc",
+        "max_sequence_score": "Max Seq",
+        "mean_sequence_score": "Mean Seq",
+        "max_pressure_residual": "Max Pressure Residual",
         "ml_anomaly_rate_pct": "ML Rate %",
         "raw_rule_alert_count": "Raw Rules",
         "grouped_rule_alert_count": "Grouped Rules",
@@ -107,6 +122,11 @@ def _print_table(results: pd.DataFrame) -> None:
 
 def main() -> None:
     detector = load_or_train_detector()
+    evaluate_scenario.ensemble = EnsemblePhaseAwareDetector(seeds=(0, 1, 2, 3, 4), n_estimators=80).fit()  # type: ignore[attr-defined]
+    nominal_runs = [generate_telemetry("nominal", seed=seed) for seed in TRAINING_SEEDS]
+    evaluate_scenario.sequence_detector = RollingWindowAnomalyDetector().fit(  # type: ignore[attr-defined]
+        pd.concat(nominal_runs, ignore_index=True)
+    )
     results = pd.DataFrame(
         evaluate_scenario(detector, scenario)
         for scenario in ANOMALY_SCENARIOS

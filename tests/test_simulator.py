@@ -129,3 +129,21 @@ class TestAnomalyInjection:
         nom_std = nom_df[nom_df["phase"] == "main_transfer"]["flow_rate"].std()
         slosh_std = slosh_df[slosh_df["phase"] == "main_transfer"]["flow_rate"].std()
         assert slosh_std > nom_std * 2, "unstable_slosh should increase flow_rate variance"
+
+    def test_sensor_dropout_zeroes_pressure_window(self):
+        df = generate_telemetry("sensor_dropout", seed=42)
+        transfer = df[df["phase"] == "main_transfer"]
+        assert (transfer["line_pressure"] == 0.0).any()
+
+    def test_stuck_at_pressure_flattens_pressure(self):
+        df = generate_telemetry("stuck_at_pressure", seed=42)
+        transfer = df[(df["phase"] == "main_transfer") & (df["time"] > 230)]
+        assert transfer["line_pressure"].std() < 0.01
+
+    def test_bias_oscillation_increases_pressure_variance_without_hard_limit(self):
+        nom_df = generate_telemetry("nominal", seed=42)
+        bias_df = generate_telemetry("bias_oscillation", seed=42)
+        nom_std = nom_df[nom_df["phase"] == "main_transfer"]["line_pressure"].std()
+        bias_transfer = bias_df[bias_df["phase"] == "main_transfer"]["line_pressure"]
+        assert bias_transfer.std() > nom_std * 4
+        assert bias_transfer.max() < 200.0

@@ -10,7 +10,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from detector import PhaseAwareDetector
+from detector import EnsemblePhaseAwareDetector, PhaseAwareDetector
+from estimator import estimate_line_pressure
 from explainer import explain_window
 from rules import alerts_to_dataframe, evaluate_rules, group_alerts
 from simulator import (
@@ -240,6 +241,21 @@ _SCENARIO_INTERPRETATION: dict[str, dict[str, str]] = {
         "noticed": "Pressure readings drift away from the usual multivariate pattern while rules remain quiet.",
         "may_indicate": "A sensor drift pattern rather than a hard pressure-limit breach.",
         "check": "Compare line pressure with donor/receiver tank pressure and verify sensor calibration assumptions.",
+    },
+    "sensor_dropout": {
+        "noticed": "Pressure readings briefly collapse while other transfer signals continue.",
+        "may_indicate": "A sensor dropout or telemetry acquisition gap rather than a physical pressure loss.",
+        "check": "Compare pressure dropouts with flow rate, pump current, and estimator residuals.",
+    },
+    "stuck_at_pressure": {
+        "noticed": "Line pressure becomes too flat during phases where small variation is expected.",
+        "may_indicate": "A stuck-at pressure sensor fault.",
+        "check": "Compare line pressure against flow, pump current, and pressure estimator residuals.",
+    },
+    "bias_oscillation": {
+        "noticed": "Pressure readings oscillate with a sensor-like bias pattern without necessarily crossing hard limits.",
+        "may_indicate": "Sensor calibration oscillation or signal-conditioning fault.",
+        "check": "Compare pressure oscillations with flow, donor pressure, and temporal ML score.",
     },
     "unstable_slosh": {
         "noticed": "Flow and pressure oscillate during transfer instead of staying smooth.",
@@ -567,16 +583,26 @@ def _load_detector() -> PhaseAwareDetector:
     return PhaseAwareDetector(contamination=0.02, n_estimators=200).fit(nom)
 
 
+@st.cache_resource(show_spinner="Training ML uncertainty ensemble on nominal seeds...")
+def _load_ensemble() -> EnsemblePhaseAwareDetector:
+    return EnsemblePhaseAwareDetector(seeds=(0, 1, 2, 3, 4), n_estimators=80).fit()
+
+
 @st.cache_data(show_spinner=False)
-def _run_scenario(scenario: str) -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame, pd.DataFrame, dict]:
+def _run_scenario(
+    scenario: str,
+) -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame, pd.DataFrame, dict, pd.DataFrame, pd.DataFrame]:
     detector = _load_detector()
+    ensemble = _load_ensemble()
     df = generate_telemetry(scenario, seed=42)
     scores = detector.score(df)
+    score_summary = ensemble.score_summary(df)
     raw_alerts = evaluate_rules(df)
     alerts_df = alerts_to_dataframe(raw_alerts)      # timestamp-level (score plot overlay)
     grouped_df = group_alerts(raw_alerts, gap_s=15.0) # event windows (dashboard display)
     contribs = explain_window(detector, df, scores, threshold=0.45, n_top=8)
-    return df, scores, alerts_df, grouped_df, contribs
+    estimates = estimate_line_pressure(df)
+    return df, scores, alerts_df, grouped_df, contribs, score_summary, estimates
 
 
 # ── Plot helpers ──────────────────────────────────────────────────────────────
@@ -659,6 +685,7 @@ def _signal_plot(
 def _score_plot(
     df: pd.DataFrame,
     scores: np.ndarray,
+    score_summary: pd.DataFrame,
     alerts_df: pd.DataFrame,
 ) -> go.Figure:
     smoothed = pd.Series(scores).rolling(5, center=True, min_periods=1).mean().values
@@ -667,6 +694,18 @@ def _score_plot(
 
     fig = go.Figure()
     _phase_bands(fig, df)
+    fig.add_trace(go.Scatter(
+        x=pd.concat([df["time"], df["time"].iloc[::-1]]),
+        y=pd.concat([
+            score_summary["ml_score_high"] * 100.0,
+            (score_summary["ml_score_low"] * 100.0).iloc[::-1],
+        ]),
+        fill="toself",
+        fillcolor="rgba(244, 162, 97, 0.16)",
+        line=dict(color="rgba(244, 162, 97, 0)"),
+        name="ML uncertainty band",
+        hoverinfo="skip",
+    ))
 
     fig.add_trace(go.Scatter(
         x=df["time"], y=score_pct,
@@ -728,6 +767,43 @@ def _score_plot(
         range=[0, 100],
         showgrid=True,
         gridcolor="#1e1e2e",
+        color="#888",
+    )
+    fig.update_layout(**layout)
+    return fig
+
+
+def _estimator_plot(estimates: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    _phase_bands(fig, estimates.rename(columns={"line_pressure_observed": "line_pressure"}))
+    fig.add_trace(go.Scatter(
+        x=estimates["time"],
+        y=estimates["line_pressure_observed"],
+        mode="lines",
+        name="Observed line pressure",
+        line=dict(width=1.4, color="#4895ef"),
+    ))
+    fig.add_trace(go.Scatter(
+        x=estimates["time"],
+        y=estimates["line_pressure_estimated"],
+        mode="lines",
+        name="Estimated line pressure",
+        line=dict(width=2.0, color="#2a9d8f"),
+    ))
+    fig.add_trace(go.Scatter(
+        x=estimates["time"],
+        y=estimates["line_pressure_residual"],
+        mode="lines",
+        name="Residual",
+        line=dict(width=1.0, color="#f4a261", dash="dot"),
+        yaxis="y2",
+    ))
+    layout = _base_layout("Line Pressure Estimate and Residual", "line pressure (bar)", height=320)
+    layout["yaxis2"] = dict(
+        title="residual (bar)",
+        overlaying="y",
+        side="right",
+        showgrid=False,
         color="#888",
     )
     fig.update_layout(**layout)
@@ -950,6 +1026,11 @@ with st.sidebar:
         value=True,
         help="Show extra plain-English guidance, captions, and glossary details.",
     )
+    show_estimator = st.toggle(
+        "Show estimator residuals",
+        value=False,
+        help="Optional lightweight state-estimation chart for observed vs estimated line pressure.",
+    )
     st.markdown("---")
 
     st.markdown("**Mission phases**")
@@ -1000,17 +1081,18 @@ st.markdown("---")
 # ── Run ───────────────────────────────────────────────────────────────────────
 
 with st.spinner(f"Running **{scenario}** scenario…"):
-    df, scores, alerts_df, grouped_df, contribs = _run_scenario(scenario)
+    df, scores, alerts_df, grouped_df, contribs, score_summary, estimates = _run_scenario(scenario)
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
 
 mass = float(df["total_mass_transferred"].max())
 anomaly_rate = float((scores > 0.45).mean() * 100)
 mean_s = float(scores.mean())
+mean_unc = float(score_summary["ml_score_uncertainty"].mean())
 n_crit = int((grouped_df["severity"] == "CRITICAL").sum()) if len(grouped_df) else 0
 n_warn = int((grouped_df["severity"] == "WARNING").sum()) if len(grouped_df) else 0
 
-m1, m2, m3, m4, m5 = st.columns(5)
+m1, m2, m3, m4, m5, m6 = st.columns(6)
 m1.metric("Mass Transferred", f"{mass:.1f} kg")
 m2.metric("ML Early-Warning Rate", f"{anomaly_rate:.1f}%",
           help="% of timesteps where ML score exceeds 0.45 alert threshold")
@@ -1018,6 +1100,8 @@ m3.metric("Mean ML Score", f"{mean_s * 100:.1f}/100",
           help="Average advisory anomaly score across full mission (0 = nominal-like, 100 = strongly unusual)")
 m4.metric("Critical Rule Events", str(n_crit), help="Grouped deterministic rule events with CRITICAL severity")
 m5.metric("Warning Rule Events", str(n_warn), help="Grouped deterministic rule events with WARNING severity")
+m6.metric("Mean ML Uncertainty", f"{mean_unc * 100:.1f}/100",
+          help="Average spread across nominal-seed detector ensemble. Higher means calibration-sensitive score.")
 
 st.markdown("")
 
@@ -1128,6 +1212,13 @@ with tab1:
     _render_signal_help(["pump_current", "propellant_temperature", "line_temperature", "bus_voltage"], beginner_mode)
     _render_chart_help("thermal_power", beginner_mode)
 
+    if show_estimator:
+        st.plotly_chart(_estimator_plot(estimates), use_container_width=True)
+        _what_to_look_for(
+            "large residuals mean observed line pressure diverged from the simple one-signal state estimate.",
+            beginner_mode,
+        )
+
     st.plotly_chart(
         _signal_plot(
             df,
@@ -1160,7 +1251,7 @@ with tab2:
             "Read this tab from top to bottom: first check whether the ML score rises, then check whether any deterministic rule events were grouped below.",
             icon="ℹ️",
         )
-    st.plotly_chart(_score_plot(df, scores, alerts_df), use_container_width=True)
+    st.plotly_chart(_score_plot(df, scores, score_summary, alerts_df), use_container_width=True)
     _what_to_look_for(
         "blue score rising above 45 suggests the combined signal pattern is less like nominal synthetic telemetry; triangle markers show rule threshold crossings.",
         beginner_mode,

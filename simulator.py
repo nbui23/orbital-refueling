@@ -42,6 +42,9 @@ ANOMALY_SCENARIOS: list[str] = [
     "pump_degradation",
     "arm_misalignment",
     "sensor_drift",
+    "sensor_dropout",
+    "stuck_at_pressure",
+    "bias_oscillation",
     "unstable_slosh",
 ]
 
@@ -52,6 +55,9 @@ SCENARIO_DESCRIPTIONS: dict[str, str] = {
     "pump_degradation": "Pump efficiency degrades mid-transfer. Current spikes; flow rate becomes erratic.",
     "arm_misalignment": "End effector never fully converges to target. Interface forces elevated throughout docking.",
     "sensor_drift": "Line pressure sensor develops a slow positive bias. Readings diverge from true state.",
+    "sensor_dropout": "Line pressure briefly drops to zero during transfer, creating obvious sensor-data gaps.",
+    "stuck_at_pressure": "Line pressure sensor freezes at one reading during transfer while flow continues.",
+    "bias_oscillation": "Line pressure sensor bias oscillates without crossing hard pressure limits.",
     "unstable_slosh": "Propellant slosh causes oscillations in flow rate and line pressure during transfer.",
 }
 
@@ -272,6 +278,22 @@ def _inject_anomaly(
         row["line_pressure"] = row["line_pressure"] + drift
         row["donor_tank_pressure"] = row["donor_tank_pressure"] + 12.0 * (t / total)
 
+    elif scenario == "sensor_dropout":
+        if phase == "main_transfer" and 35.0 <= t_phase <= 52.0:
+            row["line_pressure"] = 0.0
+        if phase == "leak_check" and 6.0 <= t_phase <= 10.0:
+            row["receiver_tank_pressure"] = 0.0
+
+    elif scenario == "stuck_at_pressure":
+        if phase in ("main_transfer", "leak_check") and t_phase >= 25.0:
+            row["line_pressure"] = _LINE_P + 1.5
+
+    elif scenario == "bias_oscillation":
+        if phase in ("pressure_equalization", "main_transfer", "leak_check"):
+            osc = float(np.sin(2 * np.pi * 0.035 * t_phase))
+            row["line_pressure"] = row["line_pressure"] + 18.0 * osc
+            row["donor_tank_pressure"] = row["donor_tank_pressure"] + 4.0 * osc
+
     elif scenario == "unstable_slosh":
         if phase in ("pressure_equalization", "main_transfer"):
             osc_fast = float(np.sin(2 * np.pi * 0.10 * t_phase))
@@ -306,6 +328,9 @@ def generate_telemetry(scenario: str = "nominal", seed: int = 42) -> pd.DataFram
         "pump_degradation": "main_transfer",
         "arm_misalignment": "arm_alignment",
         "sensor_drift": "approach",
+        "sensor_dropout": "main_transfer",
+        "stuck_at_pressure": "main_transfer",
+        "bias_oscillation": "pressure_equalization",
         "unstable_slosh": "main_transfer",
     }
     anomaly_start_phase = _anomaly_phase_map.get(scenario, "approach")
